@@ -67,71 +67,107 @@ const HANGER_SVG = `
   </g>
 </svg>`;
 
+// Detect the real bounding box of non-transparent pixels in a canvas
+function getGarmentBBox(ctx, W, H) {
+  const data = ctx.getImageData(0, 0, W, H).data;
+  let minX = W, minY = H, maxX = 0, maxY = 0;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const alpha = data[(y * W + x) * 4 + 3];
+      if (alpha > 20) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  return { minX, minY, maxX, maxY,
+    w: maxX - minX, h: maxY - minY,
+    cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
+}
+
 async function composeWithHanger(noBgDataUrl, view = "FRONT") {
   return new Promise((resolve) => {
-    const canvas = document.createElement("canvas");
-    const W = 800, H = 1000;
-    canvas.width = W; canvas.height = H;
-    const ctx = canvas.getContext("2d");
-
-    // 1. White background with subtle vignette (studio look)
-    ctx.fillStyle = "#FFFFFF";
-    ctx.fillRect(0, 0, W, H);
-
-    // Soft vignette for studio feel
-    const vignette = ctx.createRadialGradient(W/2, H/2, H*0.3, W/2, H/2, H*0.8);
-    vignette.addColorStop(0, "rgba(255,255,255,0)");
-    vignette.addColorStop(1, "rgba(235,235,235,0.4)");
-    ctx.fillStyle = vignette;
-    ctx.fillRect(0, 0, W, H);
-
-    // 2. Draw garment (removed background PNG)
     const garment = new Image();
+    garment.crossOrigin = "anonymous";
     garment.onload = () => {
-      // Natural fabric variation: subtle random rotation & drape offset
-      const wobble = (Math.random() - 0.5) * 0.012; // ±0.7°
-      const driftX = (Math.random() - 0.5) * 8;
-      const driftY = (Math.random() - 0.5) * 6;
 
-      // Garment fills ~72% of canvas width, positioned below hanger
-      const gW = W * 0.72;
-      const gH = (garment.height / garment.width) * gW;
-      const gX = (W - gW) / 2 + driftX;
-      const gY = H * 0.16 + driftY; // starts just below hanger crossbar
+      // ── Step 1: detect real bbox of garment pixels ──────────────────
+      const tmpC = document.createElement("canvas");
+      tmpC.width = garment.width; tmpC.height = garment.height;
+      const tmpCtx = tmpC.getContext("2d");
+      tmpCtx.drawImage(garment, 0, 0);
+      const bbox = getGarmentBBox(tmpCtx, garment.width, garment.height);
 
+      // ── Step 2: set up output canvas ────────────────────────────────
+      const W = 800, H = 1000;
+      const canvas = document.createElement("canvas");
+      canvas.width = W; canvas.height = H;
+      const ctx = canvas.getContext("2d");
+
+      // White background
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(0, 0, W, H);
+
+      // Subtle vignette for studio feel
+      const vig = ctx.createRadialGradient(W/2, H*0.6, H*0.15, W/2, H*0.6, H*0.75);
+      vig.addColorStop(0, "rgba(255,255,255,0)");
+      vig.addColorStop(1, "rgba(228,226,222,0.55)");
+      ctx.fillStyle = vig;
+      ctx.fillRect(0, 0, W, H);
+
+      // ── Step 3: hanger geometry (drawn first so garment overlaps bottom bar) ──
+      // Hanger crossbar bottom sits at hBarY. Garment top edge anchors there.
+      const hW = W * 0.58;                        // hanger width on canvas
+      const hH = (180 / 400) * hW;                // keep SVG aspect ratio
+      const hX = (W - hW) / 2;
+      const hY = H * 0.04;                         // top of hanger SVG
+      const hBarY = hY + hH * 0.82;               // bottom of crossbar ≈ where shoulders sit
+
+      // ── Step 4: scale garment so its bounding box fills ~76% canvas width ──
+      const targetGarmentW = W * 0.76;
+      const scale = targetGarmentW / bbox.w;
+      const scaledW = garment.width  * scale;
+      const scaledH = garment.height * scale;
+
+      // Anchor: top of garment bbox → hBarY (shoulders just below crossbar)
+      const anchorOffsetY = bbox.minY * scale;     // pixels above bbox top in scaled img
+      const destX = (W - scaledW) / 2 + (garment.width / 2 - bbox.cx) * scale; // center bbox horizontally
+      const destY = hBarY - anchorOffsetY + 2;     // +2px overlap so no gap
+
+      // Subtle natural variation (small wobble + drift)
+      const wobble = (Math.random() - 0.5) * 0.008; // ±0.46°
+      const driftX = (Math.random() - 0.5) * 6;
+
+      // Garment shadow
       ctx.save();
-      ctx.translate(W / 2 + driftX, gY + gH / 2);
+      ctx.translate(W / 2 + driftX, destY + (scaledH - anchorOffsetY) / 2 + anchorOffsetY);
       ctx.rotate(wobble);
-
-      // Soft shadow under garment
-      ctx.shadowColor = "rgba(0,0,0,0.10)";
-      ctx.shadowBlur = 18;
-      ctx.shadowOffsetX = 3;
-      ctx.shadowOffsetY = 6;
-      ctx.drawImage(garment, -gW / 2, -gH / 2, gW, gH);
+      ctx.shadowColor = "rgba(0,0,0,0.13)";
+      ctx.shadowBlur = 22;
+      ctx.shadowOffsetX = 2;
+      ctx.shadowOffsetY = 8;
+      ctx.drawImage(garment, -scaledW / 2 + (driftX * 0), -(scaledH / 2), scaledW, scaledH);
       ctx.restore();
 
-      // 3. Draw SVG hanger on top
+      // ── Step 5: draw hanger SVG ON TOP of garment shoulders ─────────
       const svgBlob = new Blob([HANGER_SVG], { type: "image/svg+xml" });
-      const svgUrl = URL.createObjectURL(svgBlob);
-      const hanger = new Image();
-      hanger.onload = () => {
-        const hW = W * 0.62;
-        const hH = (180 / 400) * hW;
-        const hX = (W - hW) / 2;
-        const hY = H * 0.055;
-        ctx.drawImage(hanger, hX, hY, hW, hH);
+      const svgUrl  = URL.createObjectURL(svgBlob);
+      const hangerImg = new Image();
+      hangerImg.onload = () => {
+        ctx.drawImage(hangerImg, hX, hY, hW, hH);
         URL.revokeObjectURL(svgUrl);
 
-        // 4. FRONT/BACK watermark (subtle, bottom center)
-        ctx.font = "500 13px 'DM Sans', sans-serif";
-        ctx.fillStyle = "rgba(160,152,144,0.6)";
+        // Subtle view label
+        ctx.font = "500 12px 'DM Sans', system-ui, sans-serif";
+        ctx.fillStyle = "rgba(155,148,140,0.55)";
         ctx.textAlign = "center";
-        ctx.fillText(view === "BACK" ? "BACK VIEW" : "FRONT VIEW", W / 2, H - 18);
+        ctx.fillText(view, W / 2, H - 16);
 
-        resolve(canvas.toDataURL("image/jpeg", 0.92));
+        resolve(canvas.toDataURL("image/jpeg", 0.93));
       };
-      hanger.src = svgUrl;
+      hangerImg.src = svgUrl;
     };
     garment.src = noBgDataUrl;
   });
